@@ -9,7 +9,6 @@ import { Language, Node } from '../types';
 import { UnresolvedRef, ResolvedRef, ResolutionContext, SUPERTYPE_TARGET_KINDS, isInheritanceRef, isImportableKind } from './types';
 import { blankStringContents, stripCommentsForRegex } from './strip-comments';
 import { JS_BUILT_INS } from './js-builtins';
-import { resolveViaImport } from './import-resolver';
 
 /**
  * Ceiling on how many same-named definitions a FUZZY name-match strategy will
@@ -2800,7 +2799,7 @@ function resolveStoreAction(inner: string, member: string, ref: UnresolvedRef, c
   } else {
     const name = inner.slice(0, -'.getState'.length);
     if (!/^[\w$]+$/.test(name)) return null;
-    const imported = resolveViaImport({ ...ref, referenceName: name, referenceKind: 'references' }, context);
+    const imported = context.resolveImport?.({ ...ref, referenceName: name, referenceKind: 'references' });
     const node = imported && context.getNodeById?.(imported.targetNodeId);
     if (node && importShadowedAt(name, ref, context)) return null;
     holders = node ? [node] : context.getNodesByName(name).filter((n) =>
