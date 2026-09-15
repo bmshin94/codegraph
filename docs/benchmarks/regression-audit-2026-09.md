@@ -312,3 +312,137 @@ Commands, the preserved pre-change engine, scripts, all attempts, databases,
 checks and full SQL comparisons are in
 `/data/workspace/codegraph-regression/review-followup/cache-optimization/`;
 `REPORT.md` and `artifacts/summary.json` consolidate the evidence.
+
+
+## Completing the large benchmark and explaining the timeouts (2026-09-15)
+
+**All four fresh native indexes and their full database checks completed.** The
+old three stops were SIGTERM from the audit runner's 180-second wall timer, not
+CodeGraph rejecting a large project or running out of memory. Those interrupted
+artifacts are unchanged. They lack CPU/progress traces, so their precise wait
+sites cannot be reconstructed retrospectively.
+
+The completing comparison uses the same VS Code platform tree (`38246c086c8a825ca90190749dd88df6effec257`, source fingerprint
+`3d629a40f93a90d29d5aa00bd06f2a7e119b4d628f20bb449cd815d972e4ccdb`),
+3,092 supported files, Node 24.16.0, native parsing and fresh SQLite databases.
+Pre-cache engine: `c6036f09fb1af3c5f4ae680d4ca63a0978016871`; cached engine:
+`da5e6e76c908447d0abd3e6c05e11deb64984736`. Only compiled `name-matcher.js`
+differs; the native kernel is identical. All qualified-reference retention
+and the repaired matching guards are preserved.
+
+Runs were sequential, cached/before with the old one-core restrictions, then
+before/cached with both available CPUs and automatic parser/resolver sizing.
+The latter is normal **CPU** configuration; both arms still use the same 1GiB
+V8 heap cap and `--liftoff-only`. Automatic resolution correctly stays sequential
+on this two-CPU VM. Both sides use identical lightweight phase/batch/DB-call
+observers; no V8 sampling profiler, reference bypass, or runtime code edit.
+There was **no elapsed-time termination condition**. Each child was polled until
+completion, with progress, CPU, RSS, thread scheduler/wait state, pressure,
+I/O and cgroup counters saved. No other servers or locks were touched.
+
+| CPU configuration | Engine | Index elapsed | Index CPU | Resolution elapsed | Resolution CPU | Peak process RSS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| One core, forced sequential | Before cache | 144.19s | 61.33s | 89.51s | 44.15s | 1003.8MiB |
+| One core, forced sequential | Cached | 133.86s | 57.58s | 79.20s | 40.43s | 1031.4MiB |
+| Two cores, automatic workers | Before cache | 126.31s | 62.73s | 74.97s | 44.84s | 1006.9MiB |
+| Two cores, automatic workers | Cached | 128.05s | 58.21s | 77.39s | 39.98s | 1037.5MiB |
+
+Index times cover `await cg.indexAll()`, including maintenance. Resolution
+includes setup, matching, persistence and synthesis. Full processes, including
+subsequent integrity/FK/orphan scans and shutdown, took 176.70/191.21/178.91/191.50s
+in execution order. In the new baseline attempts, a 180s process limit would
+have confused an already completed index with an unfinished verification.
+
+The cache saves **3.75–4.52s of whole-index CPU (6.1–7.2%)** in these pairs.
+Matching CPU falls 30.62→26.69s and 31.14→26.43s; resolution CPU falls 8.4–10.8%.
+This supports a real CPU benefit from the narrow cache. It does not establish a
+universal wall-time improvement or that every part of the original 8–10% CPU
+increase is recovered: one elapsed comparison improves 7.2%, the other worsens
+1.4%, and these are only two pairs across two CPU configurations.
+
+### What caused the long waits
+
+The reproduced delays are predominantly **disk/page waits under memory and I/O
+pressure**, not a matching loop that gets progressively more expensive:
+
+- Main-thread samples repeatedly show `D` state in `folio_wait_bit_common`,
+  `rq_qos_wait`, buffer/journal waits and block-request allocation. These are
+  kernel storage/page waits. Index maintenance has an idle, responsive main
+  event loop while its worker completes I/O; no resolver pool deadlock appears.
+- Global I/O pressure reports all runnable work stalled for 57.5–63.8% of the
+  sampled whole-process windows. This is a host metric, not an exact per-stage
+  allocation, but the indexer's own wait states directly corroborate it.
+- The VM has 3,916.6MiB total RAM. In the three runs with continuous meminfo
+  capture, available memory reaches only 158.0, 142.2 and 92.0MiB. A spot check
+  during the first completing run showed about 262MiB available. Memory-pressure
+  counters also rise. The exact source of shared memory/storage pressure is not
+  identified; no unrelated processes were modified.
+- Visible CPU quota is unlimited; throttling counters remain zero. CPU steal
+  is only 0.21–0.30% over these runs. CPU starvation is not the dominant observed
+  delay. Thread CPU/scheduler samples and responsive maintenance heartbeats
+  distinguish CPU work from waiting.
+- Across four successive groups of 18 matching batches, cached one-core median
+  CPU per batch is 365, 353, 268 and 269ms. In the two-core cached run it is 365,
+  329, 270 and 253ms. CPU work does not grow with progress. Late elapsed batches
+  can stretch while CPU remains low because the process waits for pages.
+- Setup is only 0.06–0.07s. Matching, SQLite inserts/cleanup, index rebuilding,
+  synthesis and final maintenance have separate observations. For example,
+  one-core cached matching takes 45.29s elapsed but 26.69s CPU; synthesis takes
+  15.26s elapsed/6.94s CPU, and final maintenance takes 25.04s elapsed.
+
+Three diagnostic reports were requested during long final verification gaps;
+they were delivered when the synchronous work yielded, so their JS stacks are
+empty and are not used as hotspot evidence. Kernel wait samples, batch CPU and
+phase logs are the actionable evidence. No healthy process was killed.
+
+### Correctness and benchmark repair
+
+All four runs have exactly the same 75,767 nodes, 256,523 edges and 166,516 retained
+references, including 89,157 qualified names. Every retained reference has been
+processed (`failed` denotes unresolved after attempted matching); zero remain
+pending. Full SQL `EXCEPT` comparisons in both directions, grouping complete
+rows with multiplicity, show zero additions/removals. Only node update timestamps
+and auto-increment edge/reference IDs are excluded. Ordered SHA-256 fingerprints
+also match for all three tables. Integrity checks are `ok`, with no foreign-key
+violations, orphan edges, indexing errors or missing supported files.
+
+No further resolver change was warranted by this evidence. The benchmark now
+writes phase/batch progress, cumulative CPU/RSS and event-loop measurements as
+it runs, names maintenance separately, and saves `index-result.json` **before**
+full verification. `result.json` represents completion of checks and shutdown.
+Database verification failures produce nonzero exit status. It refuses existing
+fixture indexes and reused trace files, preserving prior evidence.
+
+The portable Linux observer has no wall timeout, records the child/thread/host
+resource counters every two seconds, and leaves the caller's CPU/environment
+settings unchanged. For example, from a built checkout (all engine/fixture/output
+paths absolute; the output directory must not exist):
+
+```bash
+CODEGRAPH_KERNEL=1 CODEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1 CODEGRAPH_NO_UPDATE_CHECK=1 \
+CODEGRAPH_WASM_RELAUNCHED=1 python3 scripts/benchmarks/observe-index.py /absolute/run-before -- \
+  /absolute/node --liftoff-only --max-old-space-size=1024 \
+  scripts/benchmarks/measure-index.cjs /absolute/built-before /absolute/pinned-fixture \
+  /absolute/run-before native
+```
+
+Watch `progress.ndjson` and `resources.ndjson`; inspect CPU deltas, thread wait
+states and phase progress before stopping an apparently slow child. Archive that
+run's owned `.codegraph` directory before the next fresh run. Use the same source,
+flags and observer on both sides; run sequentially. Do not treat an external
+execution deadline as a product failure or compare incomplete databases.
+
+The revised harness and observer passed actual native and WASM integration
+checks on a two-file fixture: the real cross-file call and retained qualified
+external reference exist; completed-index evidence precedes verification;
+maintenance is identified; successful observer exits are recorded; and refusal
+of an existing index leaves its SQLite bytes unchanged. JavaScript syntax,
+Python compilation and diff checks pass. Product code and compiled engines are
+unchanged by this follow-up, so prior focused resolver tests remain applicable;
+no full-suite rerun, Mac validation, or new npm release is claimed.
+
+Full commands, four complete databases, raw observations, diagnostic startup
+failure (a worker inherited the preload; fixed before the four measured runs),
+reports, graph comparisons and harness checks are retained in
+`/data/workspace/codegraph-regression/review-followup/timeout-diagnosis/`.
+`artifacts/summary.json` and `artifacts/provenance.json` consolidate the evidence.
