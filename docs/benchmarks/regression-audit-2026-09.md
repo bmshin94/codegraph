@@ -248,3 +248,67 @@ run, RSS samples and final JSON summaries are retained under
 contains the complete-pair statistics; `artifacts/perf-manifest.json` records
 all attempts, including the rejected preflights and interrupted last run.
 The original audit artifacts and indexes remain unchanged.
+
+
+## Store eligibility cache follow-up (2026-09-15)
+
+The per-file `.getState` gate in `matchDestructuredStoreCall` now caches both
+boolean answers per resolver context, capped at 8,192 files with FIFO eviction.
+It is cleared with source caches during sync. Positive files still run all
+existing lexical, shadow, import and store-action checks. Qualified references
+and both extractors are unchanged; no diagnostic helper bypass was applied.
+
+The pre-optimization PR is `c6036f09fb1af3c5f4ae680d4ca63a0978016871`;
+implementation is `92a6c85de7050e99034a12bea1494375f5cbdab8`. Compiled-engine
+fingerprints show only `name-matcher.js` changed, with an identical native kernel.
+
+Three new real-SQLite tests pass on native and WASM: same-instance edit+sync
+in both directions, independent projects sharing relative paths, rejection of
+a same-named decoy, and retained qualified call coordinates/multiplicity.
+Deliberately removing invalidation makes the negative-to-positive case fail;
+that mutation was restored. Native focused checks passed 234/236 at normal
+limits; two Objective-C cases timed out at five seconds (also in isolation),
+then all four Objective-C assertions passed with a diagnostic 15-second
+allowance. The baseline four passed in 0.66 seconds; the optimized diagnostic
+run spent 75 seconds collecting tests. This is not a default-limit native-suite
+green verdict. WASM verified 45 affected cases: 32 initially plus 13 Steps cases
+passing in isolation after a combined-run setup timeout. No committed timeout
+or assertion was weakened. TypeScript/assets passed; the viewer build reached
+the first 240s bound, then completed separately with all 29 grammar asset checks.
+
+Full native before/after indexes on saved Excalidraw `afa3a653` have identical
+**node, edge and retained-reference contents and multiplicities**, excluding
+only update timestamps and auto-increment IDs:693 files,12,779 nodes,54,045
+edges,38,044 references. Integrity/FK/orphan/error checks pass. This preserves
+the repaired render/store relationships and the source evidence.
+
+Fresh VS Code platform timings were bounded to two reversed-order native pairs
+on the previously pinned corpus, same physical root, one CPU and worker,
+Node 24.16.0,1GiB heap/1,500MiB RSS. Three attempts reached 180s before resolution
+completed; the repeated-limit stop rule cancelled the fourth. **No whole-index
+speedup is established.** The correctness-only Excalidraw pair also varied:
+index CPU 11.90→15.87s, resolution CPU 7.71→9.57s, elapsed 14.45→170.89s, peak
+RSS 558.9→551.3MiB. Even CPU outside the changed stage rose 4.19→6.31s. This
+single pair cannot isolate a cache-caused improvement or slowdown.
+
+A bounded diagnostic replay through the actual store matcher and production
+contexts, with all 207,446 saved JS/TS call references, fresh contexts and
+reversed order, confirms the direct benefit without bypassing any helper:
+
+| Pair | Before helper CPU | Cached helper CPU | Reduction |
+| --- | ---: | ---: | ---: |
+| Before then cached |7.265s|1.046s|85.6%|
+| Cached then before |6.768s|0.990s|85.4%|
+
+Both return identical results (zero matches on this corpus). The replay's
+broader call set differs from the actual pipeline invocation set and excludes
+other resolver work, extraction, persistence and synthesis. Its 5.8–6.2s saving
+is **not** a whole-index estimate and does not establish that the earlier
+8–10% penalty or diagnostic 4.7s has been recovered in full. WASM timings and
+the full audit matrix were not repeated. Earlier Mac/parser/worker limitations
+remain.
+
+Commands, the preserved pre-change engine, scripts, all attempts, databases,
+checks and full SQL comparisons are in
+`/data/workspace/codegraph-regression/review-followup/cache-optimization/`;
+`REPORT.md` and `artifacts/summary.json` consolidate the evidence.
