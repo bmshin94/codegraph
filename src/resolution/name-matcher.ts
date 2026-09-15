@@ -1676,6 +1676,7 @@ export function clearNameMatcherMemos(context: ResolutionContext): void {
   SEALED_MODULES.delete(context);
   LOCAL_BINDING_MEMO.delete(context);
   SELECTOR_NAMES.delete(context);
+  GET_STATE_FILES.delete(context);
 }
 
 function memoPatterns(key: string, build: () => RegExp[]): RegExp[] {
@@ -2819,11 +2820,32 @@ function resolveStoreAction(inner: string, member: string, ref: UnresolvedRef, c
   return resolveObjectLiteralMember(holder, member, ref, context, 0.9, 'instance-method');
 }
 
+// Eligibility is a file property, not a call-site property. Cache both answers
+// within the same stable-source window as the resolver's file cache; sync drops
+// it via clearNameMatcherMemos. Keep only booleans, FIFO-capped like PATTERN_MEMO
+// to avoid per-hit LRU churn. Eviction merely repeats the source scan.
+const GET_STATE_FILES = new WeakMap<ResolutionContext, Map<string, boolean>>();
+const GET_STATE_FILES_CAP = 8192;
+
 /** A const destructuring is a bound reference, so it is eligible even though
  * arbitrary locally-bound bare calls must never guess a cross-file target. */
 function matchDestructuredStoreCall(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
-  const source = context.readFile(ref.filePath);
-  if (!source?.includes('.getState')) return null;
+  let files = GET_STATE_FILES.get(context);
+  if (!files) { files = new Map(); GET_STATE_FILES.set(context, files); }
+  let eligible = files.get(ref.filePath);
+  let source: string | null | undefined;
+  if (eligible === undefined) {
+    source = context.readFile(ref.filePath);
+    eligible = source?.includes('.getState') ?? false;
+    if (files.size >= GET_STATE_FILES_CAP) {
+      const oldest = files.keys().next().value;
+      if (oldest !== undefined) files.delete(oldest);
+    }
+    files.set(ref.filePath, eligible);
+  }
+  if (!eligible) return null;
+  source ??= context.readFile(ref.filePath);
+  if (!source) return null;
   const lines = source.split('\n');
   const start = enclosingScopeStartLine(ref, context) - 1;
   const before = lines.slice(start, ref.line - 1).concat(lines[ref.line - 1]!.slice(0, ref.column)).join('\n');
